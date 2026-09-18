@@ -44,10 +44,39 @@ function guessSource(userAgent) {
   return 'Source inconnue';
 }
 
-app.get('/', (req, res) => {
+// Prend la première IP de la liste (la plus proche du vrai visiteur)
+function extractFirstIp(rawIp) {
+  if (!rawIp) return null;
+  return rawIp.split(',')[0].trim();
+}
+
+// Interroge ip-api.com pour obtenir pays / région / ville à partir d'une IP
+async function geolocate(ip) {
+  // Les IP locales/privées n'ont pas de localisation
+  if (!ip || ip === '::1' || ip.startsWith('10.') || ip.startsWith('192.168.') || ip.startsWith('127.')) {
+    return null;
+  }
+  try {
+    const res = await fetch(`http://ip-api.com/json/${ip}?fields=status,country,regionName,city,query`);
+    const data = await res.json();
+    if (data.status === 'success') {
+      return { country: data.country, region: data.regionName, city: data.city };
+    }
+  } catch (e) {
+    // en cas d'échec (quota, réseau...), on continue sans géoloc
+  }
+  return null;
+}
+
+app.get('/', async (req, res) => {
+  const rawIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+  const firstIp = extractFirstIp(rawIp);
+  const geo = await geolocate(firstIp);
+
   const entry = {
     date: new Date().toISOString(),
-    ip: req.headers['x-forwarded-for'] || req.socket.remoteAddress,
+    ip: rawIp,
+    geo: geo, // { country, region, city } ou null
     userAgent: req.headers['user-agent'],
     referer: req.headers['referer'] || null,
     guess: guessSource(req.headers['user-agent']),
@@ -80,14 +109,20 @@ app.get('/stats', (req, res) => {
     return res.status(403).send('Accès refusé.');
   }
   const logs = readLogs().reverse();
-  const rows = logs.map(l => `
+  const rows = logs.map(l => {
+    const geoText = l.geo
+      ? `${l.geo.city ? l.geo.city + ', ' : ''}${l.geo.region ? l.geo.region + ', ' : ''}${l.geo.country || ''}`
+      : (l.ip && (l.ip.startsWith('10.') || l.ip.includes('::1')) ? 'IP interne (test Render)' : 'Inconnue');
+    return `
     <tr>
       <td>${l.date}</td>
       <td>${l.guess}</td>
-      <td style="max-width:300px; word-break:break-all;">${l.userAgent}</td>
-      <td>${l.ip}</td>
+      <td>${geoText}</td>
+      <td style="max-width:250px; word-break:break-all;">${l.userAgent}</td>
+      <td style="max-width:150px; word-break:break-all;">${l.ip}</td>
     </tr>
-  `).join('');
+  `;
+  }).join('');
 
   res.send(`
     <!DOCTYPE html>
@@ -96,8 +131,8 @@ app.get('/stats', (req, res) => {
     <body style="font-family: sans-serif; padding: 20px;">
       <h2>Historique des clics</h2>
       <table border="1" cellpadding="8" style="border-collapse: collapse; width:100%;">
-        <tr><th>Date</th><th>Estimation</th><th>User-Agent</th><th>IP</th></tr>
-        ${rows || '<tr><td colspan="4">Aucun clic pour le moment.</td></tr>'}
+        <tr><th>Date</th><th>Estimation</th><th>Localisation</th><th>User-Agent</th><th>IP</th></tr>
+        ${rows || '<tr><td colspan="5">Aucun clic pour le moment.</td></tr>'}
       </table>
     </body>
     </html>
